@@ -343,3 +343,8 @@ class NsModel(nn.Module):
             return logits, present_key_values
 
         return logits
+
+
+
+if __name__ == "__main__":
+    print(CUR_DIR)

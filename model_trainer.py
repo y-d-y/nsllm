@@ -205,51 +205,12 @@ def evaluate(model, val_dataset, device, batch_size=12):
 def train():
 
 
-    val_dataset = FineWebStreamingDataset(
-        parquet_path=(
-            f"{CUR_DIR}/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
-        ),
-        tokenizer_path=(
-            "{CUR_DIR}/model/tokenizer.json"
-        ),
-        context_length=2048,
-        shuffle=True,
-        shuffle_buffer_size=10_000,
-        skip_sequences=0,
-    )
-
-    # 先取前N条作为验证集并缓存
-    eval_dataset = build_val_cache(val_dataset, max_sequences=10000)
-    print(f"Validation cache size: {len(eval_dataset)} sequences")
-
-    train_dataset = FineWebStreamingDataset(
-        parquet_path=(
-            f"{CUR_DIR}/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
-        ),
-        tokenizer_path=(
-            "{CUR_DIR}/model/tokenizer.json"
-        ),
-        context_length=2048,
-        shuffle=True,
-        shuffle_buffer_size=10_000,
-        seed=42,                    # 必须和 val 一样
-        skip_sequences=10_000,      # 关键
-    )
-
-    # 再取后续数据集作为训练集
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=12,
-        num_workers=0,
-        pin_memory=True
-    )
-
-
     epochs = 1
     min_lr = 3e-5
     max_lr = 3e-4
     total_steps = 244_000
     warmup = 10_000
+    batch_size = 12
 
     device = "cuda:0"
 
@@ -268,6 +229,48 @@ def train():
     # 保存图片
     save_path = f"{CUR_DIR}/loss_curve_v2.png"
     save_interval = 100
+
+
+
+    val_dataset = FineWebStreamingDataset(
+        parquet_path=(
+            f"{CUR_DIR}/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
+        ),
+        tokenizer_path=(
+            f"{CUR_DIR}/model/tokenizer.json"
+        ),
+        context_length=2048,
+        shuffle=True,
+        shuffle_buffer_size=10_000,
+        skip_sequences=0,
+    )
+
+    # 先取前N条作为验证集并缓存
+    eval_dataset = build_val_cache(val_dataset, max_sequences=10000)
+    print(f"Validation cache size: {len(eval_dataset)} sequences")
+
+    train_dataset = FineWebStreamingDataset(
+        parquet_path=(
+            f"{CUR_DIR}/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
+        ),
+        tokenizer_path=(
+            f"{CUR_DIR}/model/tokenizer.json"
+        ),
+        context_length=2048,
+        shuffle=True,
+        shuffle_buffer_size=10_000,
+        seed=42,                    # 必须和 val 一样
+        skip_sequences=10_000,      # 关键
+    )
+
+    # 再取后续数据集作为训练集
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=0,
+        pin_memory=True
+    )
+
 
     cfg = NSConfig()
     model = NsModel(cfg)
@@ -295,7 +298,7 @@ def train():
             
             optimizer.zero_grad()
 
-            logits = model(input_ids)
+            logits = model(input_ids, past_key_values=None, use_cache=False)
 
             logits = logits.reshape(-1, logits.size(-1))
             labels = labels.reshape(-1)
@@ -326,7 +329,7 @@ def train():
 
             if step % eval_interval == 0:
                 t1 = time.time()
-                eval_loss = evaluate(model, eval_dataset, device)
+                eval_loss = evaluate(model, eval_dataset, device, batch_size=batch_size)
                 eval_loss_history.append(eval_loss)
                 eval_step_history.append(step)
 
@@ -340,8 +343,8 @@ def train():
             if step % save_interval == 0:
                 plot_and_save(step, epoch, epochs, train_step_history, train_loss_history, eval_step_history, eval_loss_history, save_path, smooth_window)
 
-            if step == 100000:
-                torch.save(model.state_dict(), f"{CUR_DIR}/model/ns_model_v2_epoch_{epoch + 1}_step_10w.bin")        
+            if step in (100000, 200000):
+                torch.save(model.state_dict(), f"{CUR_DIR}/model/ns_model_v2_epoch_{epoch + 1}_step_{step}.bin")        
 
         print(f"Epoch: {epoch + 1}/{epochs} finished")
 
