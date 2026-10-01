@@ -80,7 +80,7 @@ class GQAAttention(nn.Module):
         self.w_o = nn.Linear(cfg.n_heads * cfg.head_dim, cfg.emb_dim, bias=False)
 
 
-    def forward(self, x, cos, sin, past_key_value=None, use_cache=False):
+    def forward(self, x, cos, sin, past_key_value=None, use_cache=False, attention_mask=None):
         """
             x: [B, L, D]
             cos: [L, D]
@@ -89,6 +89,8 @@ class GQAAttention(nn.Module):
             v的形状是[B, L, H, D]，表示历史token的V值，K同理
 
             use_cache: bool
+
+            attention_mask = (bsz, seq_len),  1=keep, 0=pad  seq_len = past_len + new_tokens
         """
 
         bsz, new_tokens, _ = x.shape
@@ -119,13 +121,21 @@ class GQAAttention(nn.Module):
 
         total_len = k_attn.shape[-2]
 
+        pad_mask = None
+        # -------- 构造pad_mask
+        if attention_mask is not None:
+            pad_mask = torch.zeros_like(attention_mask, dtype=q.dtype)
+            pad_mask = pad_mask.masked_fill(attention_mask == 0, -torch.inf)
+            pad_mask = pad_mask[:, None, None, :]
+
+
         if past_len == 0:
             # 标准 causal attention
             attn_output = F.scaled_dot_product_attention(
                 q,
                 k_attn,
                 v_attn,
-                attn_mask=None,
+                attn_mask=pad_mask,
                 dropout_p=0.0,
                 is_causal=True,
             )  # [B, H, L, D]
@@ -136,7 +146,7 @@ class GQAAttention(nn.Module):
                 q,
                 k_attn,
                 v_attn,
-                attn_mask=None,
+                attn_mask=pad_mask,
                 dropout_p=0.0,
                 is_causal=False,
             )
@@ -162,15 +172,27 @@ class GQAAttention(nn.Module):
             #         ||
             #         ||
             #         \/
-            
+            #  future_mask =
             #          K0   K1  K2  K3  K4  K5  K6  K7
             #    Q5    0    0   0   0   0   0   1   1
             #    Q6    0    0   0   0   0   0   0   1
             #    Q7    0    0   0   0   0   0   0   0
 
+            # pad_mask =
+            #          K0   K1  K2  K3  K4  K5  K6    K7
+            #    Q5    0    0   0   0   0   0   inf   inf
+            #    Q6    0    0   0   0   0   0   inf   inf
+            #    Q7    0    0   0   0   0   0   inf   inf
+
             attn_mask = torch.zeros((new_tokens, total_len), dtype=q.dtype, device=x.device)
 
             attn_mask = attn_mask.masked_fill(future_mask, -torch.inf)
+
+            attn_mask = attn_mask[None, None, :, :]
+            
+            if pad_mask is not None:
+                attn_mask = attn_mask + pad_mask
+            
 
             attn_output = F.scaled_dot_product_attention(
                 q,
@@ -242,15 +264,15 @@ class TransformerBlock(nn.Module):
 
     
 
-    def forward(self, x, cos, sin, past_key_value=None, use_cache=False):
+    def forward(self, x, cos, sin, past_key_value=None, use_cache=False, attention_mask=None):
 
         residual = x
         x = self.rms_norm1(x)
 
         if use_cache:
-            x, present_key_value = self.attn(x, cos, sin, past_key_value=past_key_value, use_cache=True)
+            x, present_key_value = self.attn(x, cos, sin, past_key_value=past_key_value, use_cache=True, attention_mask=attention_mask)
         else:
-            x = self.attn(x, cos, sin, past_key_value=None, use_cache=False)
+            x = self.attn(x, cos, sin, past_key_value=None, use_cache=False, attention_mask=attention_mask)
 
         x = residual + x 
 
@@ -288,7 +310,7 @@ class NsModel(nn.Module):
         self.final_norm = RMSNorm(cfg.emb_dim, cfg.rms_norm_eps)
         self.lm_out = nn.Linear(cfg.emb_dim, cfg.vocab_size, bias=False)
 
-    def forward(self, x, past_key_values=None, use_cache=False):
+    def forward(self, x, past_key_values=None, use_cache=False, attention_mask=None):
         """
         past_key_values/present_key_values 结构
         [
@@ -297,6 +319,9 @@ class NsModel(nn.Module):
             ...
             "layer_n": (present_k, present_v),
         ]
+
+        attention_mask: [B, L]  (1=keep, 0=pad)，训练时 L = 当前输入长度；
+                    推理带 cache 时，L = past_len + new_tokens
         """
 
         bsz, seq_len = x.shape
@@ -329,10 +354,10 @@ class NsModel(nn.Module):
         for layer_idx, layer in enumerate(self.layers):
 
             if use_cache:
-                x, present_kv = layer(x, self.cos, self.sin, past_key_value=past_key_values[layer_idx], use_cache=True)
+                x, present_kv = layer(x, self.cos, self.sin, past_key_value=past_key_values[layer_idx], use_cache=True, attention_mask=attention_mask)
                 present_key_values.append(present_kv)
             else:
-                x = layer(x, self.cos, self.sin)
+                x = layer(x, self.cos, self.sin, attention_mask=attention_mask)
 
         x = self.final_norm(x)
 
