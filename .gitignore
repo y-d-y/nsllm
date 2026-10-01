@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 数据与模型
+data/
+datasets/
+checkpoints/
+*.pth
+*.ckpt
+*.pt
+*.bin
+*.safetensors
+
+# 日志与缓存
+logs/
+runs/
+*.log
+.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# 系统
+.DS_Store
+loss_curve_v2.png
