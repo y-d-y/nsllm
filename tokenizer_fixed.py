@@ -1,6 +1,8 @@
 from tokenizers import Tokenizer
 from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
+## 训练后修复decode时无ByteLevel的问题
+
 tokenizer_path = "/home/sllm_scratch/D2L/nsllm/model/tokenizer.json"
 tokenizer_path_fixed = "/home/sllm_scratch/D2L/nsllm/model/tokenizer_fixed.json"
 

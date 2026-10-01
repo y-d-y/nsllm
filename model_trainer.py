@@ -10,213 +10,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import IterableDataset, get_worker_info
 
-from dataclasses import dataclass
 from datasets import load_dataset
 from tokenizers import Tokenizer
 from torch.utils.data import DataLoader
 
 
-@dataclass
-class NSConfig:
-    vocab_size: int = 32_000
-    emb_dim: int = 768
-    n_layers: int = 12
-    n_heads: int = 12  # attn hidden dim = 12 * 64 = 768
-    head_dim: int = 64
-    n_kv_heads: int = 2
-    context_length: int = 2048
-    hidden_dim: int = 2048
+from model import NSConfig, NsModel, CUR_DIR
 
-    rope_theta: float = 10_000.0
-    rms_norm_eps: float = 1e-6
 
-    use_cache: bool = True
 
-
-
-# 1. Rope
-def init_rope(cfg: NSConfig):
-
-    inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, cfg.head_dim, 2, dtype=torch.float32) / cfg.head_dim))
-
-    pos = torch.arange(0, cfg.context_length, dtype=torch.float32)
-
-    angles = torch.einsum("i,j -> ij", pos, inv_freq)
-
-    angles = torch.cat([angles, angles], dim=-1)
-
-    cos = angles.cos()
-    sin = angles.sin()
-
-    return cos, sin
-
-
-def rotate_half(x):
-
-    head_dim = x.shape[-1]
-    assert head_dim % 2 == 0, "head dim must be even"
-    x1, x2 = x[:, :, :, : head_dim // 2], x[:, :, :, head_dim // 2 :]
-    return torch.cat([-x2, x1], dim=-1)
-
-def apply_rope(q, k, cos, sin):
-
-    seq_len = q.shape[-2]
-    cos = cos[:seq_len].unsqueeze(0).unsqueeze(0)
-    sin = sin[:seq_len].unsqueeze(0).unsqueeze(0)
-
-    q_rotated = q * cos + rotate_half(q) * sin
-    k_rotated = k * cos + rotate_half(k) * sin
-
-    return q_rotated.to(dtype=q.dtype), k_rotated.to(dtype=k.dtype)
-
-
-# 2. GQA Attention
-class GQAAttention(nn.Module):
-
-    def __init__(self, cfg: NSConfig):
-        super().__init__()
-
-        assert cfg.n_heads % cfg.n_kv_heads == 0, "n_heads must be divisible by n_kv_heads"
-
-        self.cfg = cfg
-        self.kv_group_size = cfg.n_heads // cfg.n_kv_heads
-
-        self.w_q = nn.Linear(cfg.emb_dim, cfg.n_heads * cfg.head_dim, bias=False)
-        self.w_k = nn.Linear(cfg.emb_dim, cfg.n_kv_heads * cfg.head_dim, bias=False)
-        self.w_v = nn.Linear(cfg.emb_dim, cfg.n_kv_heads * cfg.head_dim, bias=False)
-        self.w_o = nn.Linear(cfg.n_heads * cfg.head_dim, cfg.emb_dim, bias=False)
-
-
-    def forward(self, x, cos, sin):
-
-        bsz, new_tokens, _ = x.shape
-
-        q = self.w_q(x).view(bsz, new_tokens, self.cfg.n_heads, self.cfg.head_dim).transpose(1, 2)
-        k = self.w_k(x).view(bsz, new_tokens, self.cfg.n_kv_heads, self.cfg.head_dim).transpose(1, 2)
-        v = self.w_v(x).view(bsz, new_tokens, self.cfg.n_kv_heads, self.cfg.head_dim).transpose(1, 2)
-
-        q, k = apply_rope(q, k, cos, sin)
-
-        k = torch.repeat_interleave(k, self.kv_group_size, dim=1)
-        v = torch.repeat_interleave(v, self.kv_group_size, dim=1)
-
-        attn_output = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=True,
-        )  # [B, H, L, D]
-
-        context_v = attn_output.transpose(1, 2).contiguous().view(bsz, new_tokens, self.cfg.n_heads * self.cfg.head_dim)
-
-        return self.w_o(context_v)
-
-
-# 3. RMS Norm
-class RMSNorm(nn.Module):
-
-    def __init__(self, hidden_dim, eps=1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(hidden_dim))
-
-
-    def forward(self, x):
-        variance = x.float().pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps).to(x.dtype)
-        return x * self.weight
-
-
-# 4. FFN
-class FeedForward(nn.Module):
-
-    def __init__(self, cfg: NSConfig):
-        super().__init__()
-
-        self.fc1 = nn.Linear(cfg.emb_dim, cfg.hidden_dim, bias=False)
-        self.fc2 = nn.Linear(cfg.emb_dim, cfg.hidden_dim, bias=False)
-        self.fc3 = nn.Linear(cfg.hidden_dim, cfg.emb_dim, bias=False)
-
-    def forward(self, x):
-        x1 = self.fc1(x)
-        x2 = self.fc2(x)
-        x = F.silu(x1) * x2
-
-        return self.fc3(x)
-
-
-# 5. Transformer Block
-class TransformerBlock(nn.Module):
-
-    def __init__(self, cfg: NSConfig):
-
-        super().__init__()
-
-        self.cfg = cfg
-
-        self.rms_norm1 = RMSNorm(cfg.emb_dim, cfg.rms_norm_eps)
-        self.attn = GQAAttention(cfg)
-
-        self.rms_norm2 = RMSNorm(cfg.emb_dim, cfg.rms_norm_eps)
-        self.ffn = FeedForward(cfg)
-
-    
-
-    def forward(self, x, cos, sin):
-
-        residual = x
-        x = self.rms_norm1(x)
-        x = self.attn(x, cos, sin)
-        x = residual + x 
-
-        residual = x
-        x = self.rms_norm2(x)
-        x = self.ffn(x)
-        x = residual + x
-
-        return x
-
-
-# 6. NsModel
-class NsModel(nn.Module):
-
-    def __init__(self, cfg: NSConfig):
-
-        super().__init__()
-
-        self.cfg = cfg
-
-        self.emb = nn.Embedding(cfg.vocab_size, cfg.emb_dim)
-
-        cos, sin = init_rope(cfg)
-
-        self.register_buffer("cos", cos, persistent=False)
-        self.register_buffer("sin", sin, persistent=False)
-
-        self.layers = nn.ModuleList([
-            TransformerBlock(cfg) for _ in range(cfg.n_layers)
-        ])
-
-        self.final_norm = RMSNorm(cfg.emb_dim, cfg.rms_norm_eps)
-        self.lm_out = nn.Linear(cfg.emb_dim, cfg.vocab_size, bias=False)
-
-    def forward(self, x):
-
-        x = self.emb(x)
-
-        for layer in self.layers:
-            x = layer(x, self.cos, self.sin)
-
-        x = self.final_norm(x)
-
-        logits = self.lm_out(x)
-
-        return logits
-
-
-# 7. Dataset
+# 1. Dataset
 class FineWebStreamingDataset(IterableDataset):
 
     def __init__(
@@ -314,7 +117,7 @@ class FineWebStreamingDataset(IterableDataset):
                 yield (input_ids, labels)
 
 
-# 8. Learning Rate Schedule
+# 2. Learning Rate Schedule
 def get_lr(step, max_lr, min_lr, warmup_steps, total_steps):
 
     # Warmup
@@ -332,7 +135,7 @@ def get_lr(step, max_lr, min_lr, warmup_steps, total_steps):
 
 
 
-# 9. 定期保存训练曲线到PNG
+# 3. 定期保存训练曲线到PNG
 def plot_and_save(step, epoch, epochs, train_step_history, train_loss_history, eval_step_history, eval_loss_history, save_path, smooth_window):
 
 
@@ -404,10 +207,10 @@ def train():
 
     val_dataset = FineWebStreamingDataset(
         parquet_path=(
-            "/home/sllm_scratch/D2L/nsllm/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
+            f"{CUR_DIR}/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
         ),
         tokenizer_path=(
-            "/home/sllm_scratch/D2L/nsllm/model/tokenizer.json"
+            "{CUR_DIR}/model/tokenizer.json"
         ),
         context_length=2048,
         shuffle=True,
@@ -421,10 +224,10 @@ def train():
 
     train_dataset = FineWebStreamingDataset(
         parquet_path=(
-            "/home/sllm_scratch/D2L/nsllm/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
+            f"{CUR_DIR}/data/pretrain/general_en/fineweb-6b/fineweb-6b.parquet"
         ),
         tokenizer_path=(
-            "/home/sllm_scratch/D2L/nsllm/model/tokenizer.json"
+            "{CUR_DIR}/model/tokenizer.json"
         ),
         context_length=2048,
         shuffle=True,
@@ -463,7 +266,7 @@ def train():
     eval_interval = 5000
 
     # 保存图片
-    save_path = "/home/sllm_scratch/D2L/nsllm/loss_curve_v2.png"
+    save_path = f"{CUR_DIR}/loss_curve_v2.png"
     save_interval = 100
 
     cfg = NSConfig()
@@ -538,11 +341,11 @@ def train():
                 plot_and_save(step, epoch, epochs, train_step_history, train_loss_history, eval_step_history, eval_loss_history, save_path, smooth_window)
 
             if step == 100000:
-                torch.save(model.state_dict(), f"/home/sllm_scratch/D2L/nsllm/model/ns_model_v2_epoch_{epoch + 1}_step_10w.bin")        
+                torch.save(model.state_dict(), f"{CUR_DIR}/model/ns_model_v2_epoch_{epoch + 1}_step_10w.bin")        
 
         print(f"Epoch: {epoch + 1}/{epochs} finished")
 
-        torch.save(model.state_dict(), f"/home/sllm_scratch/D2L/nsllm/model/ns_model_v2_epoch_{epoch + 1}.bin")
+        torch.save(model.state_dict(), f"{CUR_DIR}/model/ns_model_v2_epoch_{epoch + 1}.bin")
 
 
 if __name__ == "__main__":
