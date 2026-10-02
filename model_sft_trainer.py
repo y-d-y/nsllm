@@ -1,4 +1,5 @@
 import json
+import os
 import math
 import time
 from dataclasses import asdict
@@ -18,59 +19,65 @@ from model_pre_trainer import plot_and_save
 def prepare_sft_model(model_path: str, device: str):
     """ SFT 阶段新增im_start、im_end 对话模板 special token """
 
-    tokenizer = Tokenizer.from_file(f"{CUR_DIR}/model/tokenizer_fixed.json")
-    tokenizer.add_special_tokens(["<|im_start|>", "<|im_end|>"])
-    tokenizer.save(f"{CUR_DIR}/model/tokenizer_sft.json")
+    # 更新tokenizer 
+    sft_tokenizer = f"{CUR_DIR}/model/tokenizer_sft.json"
+    if not os.path.exists(sft_tokenizer):
+        tokenizer = Tokenizer.from_file(f"{CUR_DIR}/model/tokenizer_fixed.json")
+        tokenizer.add_special_tokens(["<|im_start|>", "<|im_end|>"])
+        tokenizer.save(sft_tokenizer)
 
+    # 更新model
+    sft_model_weight = f"{CUR_DIR}/model/sft_model.bin"
+    if not os.path.exists(sft_model_weight):
 
-    cfg = NSConfig()
-    model = NsModel(cfg)
-    model.to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.to(device)
+        cfg = NSConfig()
+        model = NsModel(cfg)
+        model.to(device)
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        model.to(device)
 
-    cfg.vocab_size = cfg.vocab_size + 2
+        cfg.vocab_size = cfg.vocab_size + 2
 
-    # 1. 扩展embeddings
-    old_emb = model.emb
-    old_vocab, dim = old_emb.weight.shape
+        # 1. 扩展embeddings
+        old_emb = model.emb
+        old_vocab, dim = old_emb.weight.shape
 
-    new_emb = nn.Embedding(old_vocab + 2, dim)
+        new_emb = nn.Embedding(old_vocab + 2, dim)
 
-    # Embedding、lm_out两个权重矩阵的行（第0维）都对应"词表维度"
-    new_emb.weight.data[:old_vocab] = old_emb.weight.data 
-    # 方式1：使用其他token特征的平均值
-    # new_emb.weight.data[old_vocab:] = old_emb.weight.data.mean(dim=0)
-    # 方式2：special token 是结构性 token，推荐随机初始化
-    nn.init.normal_(
-        new_emb.weight[old_vocab:],
-        mean=0,
-        std=0.02
-    )
+        # Embedding、lm_out两个权重矩阵的行（第0维）都对应"词表维度"
+        new_emb.weight.data[:old_vocab] = old_emb.weight.data 
+        # 方式1：使用其他token特征的平均值
+        # new_emb.weight.data[old_vocab:] = old_emb.weight.data.mean(dim=0)
+        # 方式2：special token 是结构性 token，推荐随机初始化
+        nn.init.normal_(
+            new_emb.weight[old_vocab:],
+            mean=0,
+            std=0.02
+        )
 
-    model.emb = new_emb.to(device)
+        model.emb = new_emb.to(device)
 
-    # 2. 扩展lm_head
-    old_lm_out = model.lm_out
-    new_lm_out = nn.Linear(dim, old_vocab + 2, bias=False)
+        # 2. 扩展lm_head
+        old_lm_out = model.lm_out
+        new_lm_out = nn.Linear(dim, old_vocab + 2, bias=False)
 
-    new_lm_out.weight.data[:old_vocab, :] = old_lm_out.weight.data
-    # new_lm_out.weight.data[old_vocab:, :] = old_lm_out.weight.data.mean(dim=0)
-    nn.init.normal_(
-        new_lm_out.weight[old_vocab:],
-        mean=0,
-        std=0.02
-    )
+        new_lm_out.weight.data[:old_vocab, :] = old_lm_out.weight.data
+        # new_lm_out.weight.data[old_vocab:, :] = old_lm_out.weight.data.mean(dim=0)
+        nn.init.normal_(
+            new_lm_out.weight[old_vocab:],
+            mean=0,
+            std=0.02
+        )
 
-    model.lm_out = new_lm_out.to(device)
+        model.lm_out = new_lm_out.to(device)
 
-    print(model.emb.weight.shape)
-    print(model.lm_out.weight.shape)
+        print(model.emb.weight.shape)
+        print(model.lm_out.weight.shape)
 
-    torch.save(model.state_dict(), f"{CUR_DIR}/model/sft_model.pt")
+        torch.save(model.state_dict(), f"{CUR_DIR}/model/sft_model.bin")
 
-    with open(f"{CUR_DIR}/model/config.json", "w", encoding="utf-8") as f:
-        json.dump(asdict(cfg), f, indent=2, ensure_ascii=False)
+        with open(f"{CUR_DIR}/model/config.json", "w", encoding="utf-8") as f:
+            json.dump(asdict(cfg), f, indent=2, ensure_ascii=False)
     
 
 class SFTDataset(Dataset):
@@ -227,7 +234,7 @@ def get_lr(step, max_lr, min_lr, warmup_steps, total_steps):
     return lr
 
 
-def evaluate(model, eval_loader):
+def evaluate(model, eval_loader, device):
 
     model.eval()
     with torch.no_grad():
@@ -235,9 +242,9 @@ def evaluate(model, eval_loader):
         total_loss = 0.0
         for i, batch in enumerate(eval_loader):
             
-            input_ids = batch["input_ids"].to(model.device)
-            labels = batch["labels"].to(model.device)
-            attention_mask = batch["attention_mask"].to(model.device)
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
 
             logits = model.forward(input_ids, past_key_values=None, use_cache=False, attention_mask=attention_mask)
             shift_logits = logits[:, :-1, :]
@@ -330,18 +337,17 @@ def train():
     model = NsModel(cfg)
     model.to(device)
 
-    sft_model_path = f"{CUR_DIR}/model/sft_model.pt"
-    model.load_state_dict(torch.load(sft_model_path, map_location=device))
+    sft_model_path = f"{CUR_DIR}/model/sft_model.bin"
+    model.load_state_dict(torch.load(sft_model_path, map_location=device, weights_only=True))
     model.to(device)
-    model.train()
 
     print(f"load model: {sft_model_path} done")
-    total_steps = (train_dataset_len // batch_size) * epochs   
-    warmup_steps = total_steps * 0.05
+    total_steps = int(train_dataset_len // batch_size) * epochs   
+    warmup_steps = int(total_steps * 0.05)
     max_lr = 3e-5
     min_lr = 3e-6
 
-    eval_step = 1000
+    eval_step = 500
     log_step = 10
     curve_loss_step = 100
 
@@ -359,6 +365,7 @@ def train():
     save_path = f"{CUR_DIR}/sft_loss_curve.png"
     smooth_window = 10
 
+    model.train()
 
     optimzer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=0.01)
 
@@ -403,22 +410,21 @@ def train():
                 print(f"Epoch: {epoch + 1}/{epochs}, Step: {step}, Loss: {loss.item(): .6f}, LR: {lr:.8f}")
 
             if step % eval_step == 0:
-                eval_loss = evaluate(model, eva_loader)
+                eval_loss = evaluate(model, eva_loader, device)
                 print(f"Epoch: {epoch + 1}/{epochs}, Step: {step}, Eval Loss: {eval_loss: .6f}")
                 eval_step_history.append(step)
                 eval_loss_history.append(eval_loss)
 
             if step % curve_loss_step == 0:
-                # TODO 更新loss曲线
                 plot_and_save(
                     step, epoch, epochs, train_step_history, train_loss_history, eval_step_history, eval_loss_history, save_path, smooth_window
                 )
 
             if step in save_steps:
                 print(f"save model weight at step {step}")
-                torch.save(model.state_dict(), f"{CUR_DIR}/model/sft_model_step_{step}.pt")
+                torch.save(model.state_dict(), f"{CUR_DIR}/model/sft_model_step_{step}.bin")
 
-    torch.save(model.state_dict(), f"{CUR_DIR}/model/sft_model_step_{step}.pt")
+    torch.save(model.state_dict(), f"{CUR_DIR}/model/sft_model_step_{step}.bin")
 
 
 
