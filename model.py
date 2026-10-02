@@ -124,6 +124,8 @@ class GQAAttention(nn.Module):
         pad_mask = None
         # -------- 构造pad_mask
         if attention_mask is not None:
+            assert attention_mask.shape[-1] == total_len, "attention_mask的长度必须和total_len长度一致" 
+
             pad_mask = torch.zeros_like(attention_mask, dtype=q.dtype)
             pad_mask = pad_mask.masked_fill(attention_mask == 0, -torch.inf)
             pad_mask = pad_mask[:, None, None, :]
@@ -177,6 +179,12 @@ class GQAAttention(nn.Module):
             #    Q5    0    0   0   0   0   0   1   1
             #    Q6    0    0   0   0   0   0   0   1
             #    Q7    0    0   0   0   0   0   0   0
+
+            #  attn_mask =
+            #          K0   K1  K2  K3  K4  K5  K6    K7
+            #    Q5    0    0   0   0   0   0   inf   inf
+            #    Q6    0    0   0   0   0   0   0     inf
+            #    Q7    0    0   0   0   0   0   0     0
 
             # pad_mask =
             #          K0   K1  K2  K3  K4  K5  K6    K7
