@@ -297,13 +297,11 @@ def train():
     device = torch.device("cuda", rank)
     torch.manual_seed(123)
 
-    if rank == 0:
-        capability = torch.cuda.get_device_capability()
-        if capability[0] >= 7:
-            torch.set_float32_matmul_precision("high")
-            print("Uses tensor cores")
+    capability = torch.cuda.get_device_capability()
+    if capability[0] >= 7:
+        torch.set_float32_matmul_precision("high")
+        print("Uses tensor cores")
     
-    torch.distributed.barrier(device_ids=[device.index])
 
 
     tokenizer = Tokenizer.from_file(f"{CUR_DIR}/model/tokenizer_sft.json")
@@ -326,7 +324,10 @@ def train():
 
     dataset_dict = load_dataset("parquet", data_files=data_files)
 
-    split = dataset_dict["train"].train_test_split(test_size=0.1, seed=42)
+    full = dataset_dict["train"]
+    # full = dataset_dict["train"].select(range(10000))  测试时使用
+
+    split = full.train_test_split(test_size=0.1, seed=42)
     train_split, eval_split = split["train"], split["test"]
 
     train_dataset_len = len(train_split)
@@ -342,28 +343,30 @@ def train():
         pad_token_id=tokenizer.token_to_id("<pad>")
     )
 
+    if rank == 0:
+        eva_loader = DataLoader(
+            eval_ds,
+            batch_size=batch_size,
+            num_workers=4,
+            persistent_workers=True,
+            shuffle=False,
+            pin_memory=True,
+            collate_fn=collator,
+            drop_last=False,
+        )
 
-    eva_loader = DataLoader(
-        eval_ds,
-        batch_size=batch_size,
-        num_workers=4,
-        persistent_workers=True,
-        shuffle=False,
-        pin_memory=True,
-        collate_fn=collator,
-        drop_last=True,
-        sampler=DistributedSampler(eval_ds)          
-    )
+    torch.distributed.barrier()
+
 
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         num_workers=4,
         persistent_workers=True,
-        shuffle=False,
         pin_memory=True,
         collate_fn=collator,
-        sampler=DistributedSampler(train_ds)
+        drop_last=True,
+        sampler=DistributedSampler(train_ds, shuffle=True, drop_last=True)
     )
 
     if rank == 0:
@@ -381,12 +384,12 @@ def train():
     model.load_state_dict(torch.load(sft_model_path, map_location=device, weights_only=True))
     model = model.to(device)
     model = DDP(model, device_ids=[rank])
-    model = torch.compile(model)
+    # model = torch.compile(model)
 
     if rank == 0:
         print(f"load model: {sft_model_path} done")
     
-    total_steps = int(train_dataset_len // (batch_size * world_size)) * epochs   # batch_size is per gpu batch
+    total_steps = len(train_loader) * epochs
     warmup_steps = int(total_steps * 0.05)
     max_lr = 3e-5
     min_lr = 3e-6
@@ -413,7 +416,7 @@ def train():
 
     model.train()
 
-    optimzer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=max_lr, weight_decay=0.01)
 
     step = 0
 
@@ -423,26 +426,24 @@ def train():
 
         for batch in train_loader:
 
-            input_ids = batch["input_ids"].to(device)
-            labels = batch["labels"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            labels = batch["labels"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
 
-            optimzer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
             lr = get_lr(step, max_lr, min_lr, warmup_steps, total_steps)
 
-            for param_group in optimzer.param_groups:
+            for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
 
 
-            logits = model.forward(input_ids, past_key_values=None, use_cache=False, attention_mask=attention_mask)
+            logits = model(input_ids, past_key_values=None, use_cache=False, attention_mask=attention_mask)
 
             shift_logits = logits[:, :-1, :]
             shift_labels = labels[:, 1:]
 
             loss = F.cross_entropy(shift_logits.reshape(-1, shift_logits.size(-1)), shift_labels.reshape(-1), ignore_index=-100)
-
-            step += 1
 
             loss_tensor = loss.detach()
             torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
@@ -455,8 +456,9 @@ def train():
                 1.0
             )
 
-            optimzer.step()
+            optimizer.step()
 
+            step += 1
 
             train_step_history.append(step)
             train_loss_history.append(loss_avg.item())
@@ -471,7 +473,7 @@ def train():
                     eval_loss_history.append(eval_loss)
                     print(f"Epoch: {epoch + 1}/{epochs}, Step: {step}, Eval Loss: {eval_loss: .6f}")
 
-                torch.distributed.barrier()
+            torch.distributed.barrier() # 让rank=1等待 rank0 完成evaluate
 
             if rank == 0 and step % curve_loss_step == 0:
                 plot_and_save(
@@ -481,6 +483,7 @@ def train():
             if rank == 0 and step in save_steps:
                 print(f"save model weight at step {step}")
                 torch.save(model.module.state_dict(), f"{CUR_DIR}/model/sft_model_ddp_step_{step}.bin")
+
 
     if rank == 0:
         torch.save(model.module.state_dict(), f"{CUR_DIR}/model/sft_model_ddp_step_{step}.bin")
