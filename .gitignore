@@ -24,5 +24,3 @@ runs/
 
 # IDE
 .vscode/
-loss_curve_v2.png
-sft_ddp_loss_curve.png
