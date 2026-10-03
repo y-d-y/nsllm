@@ -267,17 +267,11 @@ def evaluate(model, eval_loader, device):
 
 def train():
 
-    if "WORLD_SIZE" in os.environ:
-        world_size = int(os.environ["WORLD_SIZE"])
-    else:
-        raise ValueError("WORLD_SIZE not set")
+    # world_size, rank, local_rank 3个环境变量由torchrun --nproc_per_node=2 sft_trainer.py 自动设置
 
-    if "RANK" in os.environ:
-        rank = int(os.environ["RANK"])
-    elif "LOCAL_RANK" in os.environ:
-        local_rank = int(os.environ["LOCAL_RANK"])
-    else:
-        raise ValueError("LOCAL_RANK not set")
+    world_size = int(os.environ["WORLD_SIZE"])
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
 
     # 准备分布式环境
     if "MASTER_ADDR" not in os.environ:
@@ -297,7 +291,7 @@ def train():
         torch.set_float32_matmul_precision("high")
         print("Uses tensor cores")
     
-
+    print(f"DDP initialized: world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
 
     tokenizer = Tokenizer.from_file(f"{CUR_DIR}/model/tokenizer_sft.json")
     im_start_id = tokenizer.token_to_id("<|im_start|>")
@@ -320,7 +314,7 @@ def train():
     dataset_dict = load_dataset("parquet", data_files=data_files)
 
     full = dataset_dict["train"]
-    # full = dataset_dict["train"].select(range(10000))  测试时使用
+    # full = dataset_dict["train"].select(range(10000))  # 测试时使用
 
     split = full.train_test_split(test_size=0.1, seed=42)
     train_split, eval_split = split["train"], split["test"]
@@ -395,8 +389,8 @@ def train():
 
     save_steps = (int(total_steps * 0.5), int(total_steps * 0.8)) 
 
-    
-    print(f"total_steps = {total_steps}, warmup_steps = {warmup_steps}, max_lr = {max_lr}, min_lr = {min_lr}")
+    if rank == 0:
+        print(f"total_steps = {total_steps}, warmup_steps = {warmup_steps}, max_lr = {max_lr}, min_lr = {min_lr}")
 
 
     train_step_history = []
@@ -406,8 +400,6 @@ def train():
     save_path = f"{CUR_DIR}/sft_ddp_loss_curve.png"
     smooth_window = 10
 
-
-    rank = get_rank()
 
     model.train()
 
