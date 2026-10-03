@@ -222,19 +222,6 @@ class SFTCollator:
         }
 
 
-# 准备分布式环境
-def setup_ddp(rank, world_size):
-
-    if "MASTER_ADDR" not in os.environ:
-        os.environ["MASTER_ADDR"] = "localhost"
-    if "MASTER_PORT" not in os.environ:
-        os.environ["MASTER_PORT"] = "12345"
-
-    init_process_group("nccl", rank=rank, world_size=world_size)
-
-    torch.cuda.set_device(rank)
-
-
 
 def get_lr(step, max_lr, min_lr, warmup_steps, total_steps):
 
@@ -288,13 +275,21 @@ def train():
     if "RANK" in os.environ:
         rank = int(os.environ["RANK"])
     elif "LOCAL_RANK" in os.environ:
-        rank = int(os.environ["LOCAL_RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
     else:
-        raise ValueError("RANK not set")
-    
-    setup_ddp(rank, world_size)
+        raise ValueError("LOCAL_RANK not set")
 
-    device = torch.device("cuda", rank)
+    # 准备分布式环境
+    if "MASTER_ADDR" not in os.environ:
+        os.environ["MASTER_ADDR"] = "localhost"
+    if "MASTER_PORT" not in os.environ:
+        os.environ["MASTER_PORT"] = "12345"
+
+    torch.cuda.set_device(local_rank) 
+    init_process_group("nccl", rank=rank, world_size=world_size, device_id=local_rank)
+
+
+    device = torch.device("cuda", local_rank)
     torch.manual_seed(123)
 
     capability = torch.cuda.get_device_capability()
@@ -355,7 +350,7 @@ def train():
             drop_last=False,
         )
 
-    torch.distributed.barrier()
+    torch.distributed.barrier(device_ids=[local_rank])
 
 
     train_loader = DataLoader(
@@ -383,7 +378,7 @@ def train():
     sft_model_path = f"{CUR_DIR}/model/sft_model.bin"
     model.load_state_dict(torch.load(sft_model_path, map_location=device, weights_only=True))
     model = model.to(device)
-    model = DDP(model, device_ids=[rank])
+    model = DDP(model, device_ids=[local_rank])
     # model = torch.compile(model)
 
     if rank == 0:
@@ -473,7 +468,7 @@ def train():
                     eval_loss_history.append(eval_loss)
                     print(f"Epoch: {epoch + 1}/{epochs}, Step: {step}, Eval Loss: {eval_loss: .6f}")
 
-            torch.distributed.barrier() # 让rank=1等待 rank0 完成evaluate
+            torch.distributed.barrier(device_ids=[local_rank]) # 让rank=1等待 rank0 完成evaluate
 
             if rank == 0 and step % curve_loss_step == 0:
                 plot_and_save(
