@@ -291,8 +291,6 @@ def train():
         torch.set_float32_matmul_precision("high")
         print("Uses tensor cores")
     
-    print(f"DDP initialized: world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
-
     tokenizer = Tokenizer.from_file(f"{CUR_DIR}/model/tokenizer_sft.json")
     im_start_id = tokenizer.token_to_id("<|im_start|>")
     im_end_id = tokenizer.token_to_id("<|im_end|>")
@@ -374,6 +372,8 @@ def train():
     model = model.to(device)
     model = DDP(model, device_ids=[local_rank])
     # model = torch.compile(model)
+
+    print(f"DDP initialized: world_size={world_size}, rank={rank}, local_rank={local_rank}, device={device}")
 
     if rank == 0:
         print(f"load model: {sft_model_path} done")
@@ -481,6 +481,6 @@ if __name__ == "__main__":
     # prepare_sft_model(f"{CUR_DIR}/model/pretrain_model.bin", device="cuda:1")
 
     # run method
-    # torchrun --nproc_per_node=2 sft_trainer.py
+    # torchrun --nproc_per_node=2 model_sft_ddp_trainer.py
     
     train()
