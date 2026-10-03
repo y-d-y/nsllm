@@ -488,7 +488,7 @@ def train():
     destroy_process_group()
 
 if __name__ == "__main__": 
-    # prepare_sft_model(f"{CUR_DIR}/model/ns_model_v2_epoch_1_step_10w.bin", device="cuda:1")
+    # prepare_sft_model(f"{CUR_DIR}/model/pretrain_model.bin", device="cuda:1")
 
     # run method
     # torchrun --nproc_per_node=2 sft_trainer.py

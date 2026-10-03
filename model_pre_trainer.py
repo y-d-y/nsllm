@@ -227,7 +227,7 @@ def train():
     eval_interval = 5000
 
     # 保存图片
-    save_path = f"{CUR_DIR}/loss_curve_v2.png"
+    save_path = f"{CUR_DIR}/pretrain_loss_curve.png"
     save_interval = 100
 
 
@@ -344,11 +344,11 @@ def train():
                 plot_and_save(step, epoch, epochs, train_step_history, train_loss_history, eval_step_history, eval_loss_history, save_path, smooth_window)
 
             if step in (100000, 200000):
-                torch.save(model.state_dict(), f"{CUR_DIR}/model/ns_model_v2_epoch_{epoch + 1}_step_{step}.bin")        
+                torch.save(model.state_dict(), f"{CUR_DIR}/model/pretrain_ns_model_epoch_{epoch + 1}_step_{step}.bin")        
 
         print(f"Epoch: {epoch + 1}/{epochs} finished")
 
-        torch.save(model.state_dict(), f"{CUR_DIR}/model/ns_model_v2_epoch_{epoch + 1}.bin")
+        torch.save(model.state_dict(), f"{CUR_DIR}/model/pretrain_ns_model_epoch_{epoch + 1}.bin")
 
 
 if __name__ == "__main__":

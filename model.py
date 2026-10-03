@@ -10,7 +10,7 @@ CUR_DIR = os.path.dirname(__file__)
 
 @dataclass
 class NSConfig:
-    vocab_size: int = 32_000
+    vocab_size: int = 32_000  # NOTE: SFT阶段增加至 32_002， 新增<|im_start|> <|im_end|> 两个token
     emb_dim: int = 768
     n_layers: int = 12
     n_heads: int = 12  # attn hidden dim = 12 * 64 = 768
@@ -186,11 +186,17 @@ class GQAAttention(nn.Module):
             #    Q6    0    0   0   0   0   0   0     inf
             #    Q7    0    0   0   0   0   0   0     0
 
-            # pad_mask =
+            # sequence 1 pad_mask =
             #          K0   K1  K2  K3  K4  K5  K6    K7
             #    Q5    0    0   0   0   0   0   inf   inf
             #    Q6    0    0   0   0   0   0   inf   inf
             #    Q7    0    0   0   0   0   0   inf   inf
+
+            # sequence 2 pad_mask =  (sequence 2 is the longest in the batch)
+            #          K0   K1  K2  K3  K4  K5  K6    K7
+            #    Q5    0    0   0   0   0   0   0     0
+            #    Q6    0    0   0   0   0   0   0     0
+            #    Q7    0    0   0   0   0   0   0     0
 
             attn_mask = torch.zeros((new_tokens, total_len), dtype=q.dtype, device=x.device)
 
@@ -199,6 +205,7 @@ class GQAAttention(nn.Module):
             attn_mask = attn_mask[None, None, :, :]
             
             if pad_mask is not None:
+                # 使用加法： casual mask ( 0  or -inf)  + pad mask (0  or -inf)
                 attn_mask = attn_mask + pad_mask
             
 

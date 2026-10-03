@@ -24,9 +24,4 @@ runs/
 
 # IDE
 .vscode/
-.idea/
-
-# 系统
-.DS_Store
 loss_curve_v2.png
-sft_loss_curve.png
