@@ -21,7 +21,7 @@ from model_pre_trainer import plot_and_save
 
 
 def prepare_sft_model(model_path: str, device: str):
-    """ SFT 阶段新增im_start、im_end 对话模板 special token """
+    """ SFT 阶段新增<|im_start|>、<|im_end|> 对话模板 special token """
 
     # 更新tokenizer 
     sft_tokenizer = f"{CUR_DIR}/model/tokenizer_sft.json"
