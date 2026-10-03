@@ -1,4 +1,4 @@
-# nsllm — 从零开始的大语言模型训练教程
+# pretrain_sft_llm_scratch — 从零开始的大语言模型训练教程
 
 **不用任何训练框架，只用 PyTorch 原生 API**，从 Tokenizer 开始，亲手完成一个大语言模型的 **预训练（Pretrain）→ 指令微调（SFT）** 全流程，并在 2×A100-40GB 上跑通单卡与 DDP 分布式两种训练方案。
 
